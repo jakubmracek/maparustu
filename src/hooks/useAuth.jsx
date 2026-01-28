@@ -9,22 +9,46 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Získej aktuální session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
-      if (session?.user) {
-        loadUcitelProfile(session.user.id)
-      } else {
-        setLoading(false)
-      }
-    })
+    let isMounted = true
 
-    // Poslouchej změny auth stavu
+    const loadUcitelProfile = async (userId) => {
+      try {
+        console.log('[Auth] Načítám profil učitele:', userId)
+        const profile = await getUcitelProfile(userId)
+        if (isMounted) {
+          console.log('[Auth] Profil načten:', profile)
+          setUcitel(profile)
+        }
+      } catch (error) {
+        console.error('[Auth] Chyba při načítání profilu:', error)
+        if (isMounted) {
+          setUcitel(null)
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false)
+        }
+      }
+    }
+
+    // Supabase v2: onAuthStateChange se spustí OKAMŽITĚ s INITIAL_SESSION
+    // Nepotřebujeme volat getSession() zvlášť
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        console.log('[Auth] Auth event:', event, session?.user?.email)
+
+        if (!isMounted) return
+
         setUser(session?.user ?? null)
+
         if (session?.user) {
-          await loadUcitelProfile(session.user.id)
+          // Použijeme setTimeout aby se React stih renderovat
+          // a zabráníme Supabase deadlocku při RLS
+          setTimeout(() => {
+            if (isMounted) {
+              loadUcitelProfile(session.user.id)
+            }
+          }, 0)
         } else {
           setUcitel(null)
           setLoading(false)
@@ -32,20 +56,20 @@ export const AuthProvider = ({ children }) => {
       }
     )
 
-    return () => subscription.unsubscribe()
-  }, [])
+    // Fallback timeout - pokud se do 10s nic nestane, ukonči loading
+    const timeoutId = setTimeout(() => {
+      if (isMounted && loading) {
+        console.warn('[Auth] Timeout - ukončuji loading')
+        setLoading(false)
+      }
+    }, 10000)
 
-  const loadUcitelProfile = async (userId) => {
-    try {
-      const profile = await getUcitelProfile(userId)
-      setUcitel(profile)
-    } catch (error) {
-      console.error('Chyba při načítání profilu:', error)
-      setUcitel(null)
-    } finally {
-      setLoading(false)
+    return () => {
+      isMounted = false
+      subscription.unsubscribe()
+      clearTimeout(timeoutId)
     }
-  }
+  }, [])
 
   const signIn = async (email, password) => {
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -57,6 +81,7 @@ export const AuthProvider = ({ children }) => {
   }
 
   const signOut = async () => {
+    setLoading(true)
     const { error } = await supabase.auth.signOut()
     if (error) throw error
   }
