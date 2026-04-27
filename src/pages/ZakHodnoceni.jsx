@@ -20,6 +20,23 @@ const STUPNE = [
   { value: 'nezvlada', label: 'Nezvládá', color: 'red' },
 ]
 
+// Pomocná funkce pro výpočet dostupných školních roků a pololetí
+const getAvailablePeriods = () => {
+  const currentDate = new Date()
+  const currentMonth = currentDate.getMonth() + 1
+  const currentYear = currentDate.getFullYear()
+  
+  // Aktuální školní rok
+  const currentSkolniRok = currentMonth >= 9 
+    ? `${currentYear}/${currentYear + 1 - 2000}` 
+    : `${currentYear - 1}/${currentYear - 2000}`
+  
+  // Aktuální pololetí
+  const currentPololeti = currentMonth >= 2 && currentMonth <= 8 ? 2 : 1
+  
+  return { currentSkolniRok, currentPololeti }
+}
+
 export default function ZakHodnoceni() {
   const { zakId } = useParams()
   const { ucitel } = useAuth()
@@ -33,18 +50,22 @@ export default function ZakHodnoceni() {
   const [successMessage, setSuccessMessage] = useState('')
   const [activeOblast, setActiveOblast] = useState('matematika')
 
-  // Aktuální školní rok a pololetí
-  const currentDate = new Date()
-  const currentMonth = currentDate.getMonth() + 1
-  const currentYear = currentDate.getFullYear()
-  const skolniRok = currentMonth >= 9 
-    ? `${currentYear}/${currentYear + 1 - 2000}` 
-    : `${currentYear - 1}/${currentYear - 2000}`
-  const pololeti = currentMonth >= 2 && currentMonth <= 8 ? 2 : 1
+  // Období - školní rok a pololetí
+  const { currentSkolniRok, currentPololeti } = getAvailablePeriods()
+  const [skolniRok, setSkolniRok] = useState(currentSkolniRok)
+  const [pololeti, setPololeti] = useState(currentPololeti)
+  const [availableSkolniRoky, setAvailableSkolniRoky] = useState([currentSkolniRok])
 
   useEffect(() => {
     loadData()
   }, [zakId])
+
+  // Reload hodnocení při změně období
+  useEffect(() => {
+    if (zak && trida) {
+      loadHodnoceni()
+    }
+  }, [skolniRok, pololeti, zak, trida])
 
   const loadData = async () => {
     try {
@@ -61,6 +82,21 @@ export default function ZakHodnoceni() {
       setZak(zakData)
       setTrida(zakData.trida)
 
+      // Načti dostupné školní roky z existujících hodnocení
+      const { data: rokyData } = await supabase
+        .from('hodnoceni')
+        .select('skolni_rok')
+        .eq('zak_id', zakId)
+      
+      if (rokyData && rokyData.length > 0) {
+        const uniqueRoky = [...new Set(rokyData.map(r => r.skolni_rok))]
+        if (!uniqueRoky.includes(currentSkolniRok)) {
+          uniqueRoky.push(currentSkolniRok)
+        }
+        uniqueRoky.sort().reverse()
+        setAvailableSkolniRoky(uniqueRoky)
+      }
+
       // Načti výstupy pro daný ročník
       const { data: vystupyData, error: vystupyError } = await supabase
         .from('vystup')
@@ -73,26 +109,8 @@ export default function ZakHodnoceni() {
       if (vystupyError) throw vystupyError
       setVystupy(vystupyData)
 
-      // Načti existující hodnocení
-      const { data: hodnoceniData, error: hodnoceniError } = await supabase
-        .from('hodnoceni')
-        .select('*')
-        .eq('zak_id', zakId)
-        .eq('skolni_rok', skolniRok)
-        .eq('pololeti', pololeti)
-
-      if (hodnoceniError) throw hodnoceniError
-
-      // Převeď na objekt indexed by vystup_id
-      const hodnoceniMap = {}
-      hodnoceniData.forEach(h => {
-        hodnoceniMap[h.vystup_id] = {
-          id: h.id,
-          stupen: h.stupen,
-          poznamky: h.poznamky || [],
-        }
-      })
-      setHodnoceni(hodnoceniMap)
+      // Načti hodnocení pro aktuální období
+      await loadHodnoceniInternal(zakId, skolniRok, pololeti)
 
     } catch (err) {
       console.error('Error loading data:', err)
@@ -100,6 +118,38 @@ export default function ZakHodnoceni() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const loadHodnoceni = async () => {
+    if (!zak) return
+    setLoading(true)
+    await loadHodnoceniInternal(zak.id, skolniRok, pololeti)
+    setLoading(false)
+  }
+
+  const loadHodnoceniInternal = async (zakIdParam, skolniRokParam, pololetiParam) => {
+    const { data: hodnoceniData, error: hodnoceniError } = await supabase
+      .from('hodnoceni')
+      .select('*')
+      .eq('zak_id', zakIdParam)
+      .eq('skolni_rok', skolniRokParam)
+      .eq('pololeti', pololetiParam)
+
+    if (hodnoceniError) {
+      console.error('Error loading hodnoceni:', hodnoceniError)
+      return
+    }
+
+    // Převeď na objekt indexed by vystup_id
+    const hodnoceniMap = {}
+    hodnoceniData.forEach(h => {
+      hodnoceniMap[h.vystup_id] = {
+        id: h.id,
+        stupen: h.stupen,
+        poznamky: h.poznamky || [],
+      }
+    })
+    setHodnoceni(hodnoceniMap)
   }
 
   const handleStupenChange = async (vystupId, newStupen) => {
@@ -254,18 +304,43 @@ export default function ZakHodnoceni() {
             {zak?.jmeno} {zak?.prijmeni}
           </h1>
           <p className="mt-1 text-gray-600">
-            {trida?.nazev} • {trida?.rocnik}. ročník • {skolniRok} • {pololeti}. pololetí
+            {trida?.nazev} • {trida?.rocnik}. ročník
           </p>
         </div>
-        <button
-          onClick={exportMarkdown}
-          className="inline-flex items-center px-4 py-2 bg-vilekula-600 text-white rounded-lg hover:bg-vilekula-700 transition"
-        >
-          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-          Export do Markdown
-        </button>
+        
+        {/* Období selector + Export */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
+            <label className="text-sm text-gray-600">Období:</label>
+            <select
+              value={skolniRok}
+              onChange={(e) => setSkolniRok(e.target.value)}
+              className="border-0 bg-transparent text-sm font-medium focus:ring-0 pr-6"
+            >
+              {availableSkolniRoky.map(rok => (
+                <option key={rok} value={rok}>{rok}</option>
+              ))}
+            </select>
+            <select
+              value={pololeti}
+              onChange={(e) => setPololeti(parseInt(e.target.value))}
+              className="border-0 bg-transparent text-sm font-medium focus:ring-0 pr-6"
+            >
+              <option value={1}>1. pololetí</option>
+              <option value={2}>2. pololetí</option>
+            </select>
+          </div>
+          
+          <button
+            onClick={exportMarkdown}
+            className="inline-flex items-center px-4 py-2 bg-vilekula-600 text-white rounded-lg hover:bg-vilekula-700 transition"
+          >
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Export
+          </button>
+        </div>
       </div>
 
       {successMessage && (
